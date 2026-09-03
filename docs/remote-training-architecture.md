@@ -2,7 +2,7 @@
 
 Status: proposed design; no client or server implementation exists in this repository yet.
 
-The repository now also contains an implemented, local-only checkpoint variant at `animgen_checkpoint/train_controller.py`. That script is an intermediate reliability improvement and is not the remote client/server implementation described below. Its usage and behavior are documented in `animgen_checkpoint/README.md`.
+The repository now also contains an implemented, local-only checkpoint variant at `animgen_checkpoint/train_controller_checkpoint.py`. To install it, copy it over Unreal Engine's `Engine/Plugins/Experimental/Animation/AnimGen/Content/Python/train_controller.py`, keeping the destination filename `train_controller.py`. The original UE 5.8 scripts copied into `reference/` remain comparison references and should not be installed from there. The checkpoint script is an intermediate reliability improvement and is not the remote client/server implementation described below. Its usage and behavior are documented in `animgen_checkpoint/README.md`.
 
 ## Executive decision
 

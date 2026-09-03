@@ -1,18 +1,25 @@
 # Local Controller Checkpoint Trainer
 
-`train_controller.py` is a drop-in local replacement for Unreal Engine AnimGen's controller training entry point. It preserves the original command-line and shared-memory contracts while adding periodic, resumable local checkpoints.
+`train_controller_checkpoint.py` is a drop-in local replacement for Unreal Engine AnimGen's controller training entry point. It preserves the original command-line and shared-memory contracts while adding periodic, resumable local checkpoints.
 
 The file currently targets the AnimGen script inspected at Unreal Engine revision `a899359c3efb`.
 
 ## Installation
 
-Close any active AnimGen training process. Back up the Unreal Engine file below, then copy this directory's `train_controller.py` over it:
+Close Unreal Editor and any active AnimGen training process. Back up the Unreal Engine file below, then copy `animgen_checkpoint/train_controller_checkpoint.py` over it, renaming the copied file to `train_controller.py`:
+
+```text
+Source:      animgen_checkpoint/train_controller_checkpoint.py
+Destination: Engine/Plugins/Experimental/Animation/AnimGen/Content/Python/train_controller.py
+```
+
+The destination must retain the original entry-point filename:
 
 ```text
 Engine/Plugins/Experimental/Animation/AnimGen/Content/Python/train_controller.py
 ```
 
-Do not replace `train_autoencoder.py`.
+Do not copy the whole `animgen_checkpoint` directory into Unreal Engine, and do not replace `train_autoencoder.py`. The files under `reference/` are unmodified UE 5.8 reference copies and are not the files to install.
 
 ## Default behavior
 
