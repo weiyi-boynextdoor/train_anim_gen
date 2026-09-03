@@ -2,6 +2,8 @@
 
 Status: proposed design; no client or server implementation exists in this repository yet.
 
+The repository now also contains an implemented, local-only checkpoint variant at `animgen_checkpoint/train_controller.py`. That script is an intermediate reliability improvement and is not the remote client/server implementation described below. Its usage and behavior are documented in `animgen_checkpoint/README.md`.
+
 ## Executive decision
 
 The proposed client/server split is feasible and is a good way to avoid running long GPU workloads on an Unreal Editor workstation. The safest first integration is to replace the two Python entry points that Unreal launches with thin bridge clients while leaving the C++ editor code unchanged.
