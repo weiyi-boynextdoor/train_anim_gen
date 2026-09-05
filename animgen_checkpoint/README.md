@@ -6,20 +6,12 @@ The file currently targets the AnimGen script inspected at Unreal Engine revisio
 
 ## Installation
 
-Close Unreal Editor and any active AnimGen training process. Back up the Unreal Engine file below, then copy `animgen_checkpoint/train_controller_checkpoint.py` over it, renaming the copied file to `train_controller.py`:
+Replace original train_controller.py (make a backup for your own) with train_controller_checkpoint.py (rename it to train_controller.py)
 
 ```text
 Source:      animgen_checkpoint/train_controller_checkpoint.py
 Destination: Engine/Plugins/Experimental/Animation/AnimGen/Content/Python/train_controller.py
 ```
-
-The destination must retain the original entry-point filename:
-
-```text
-Engine/Plugins/Experimental/Animation/AnimGen/Content/Python/train_controller.py
-```
-
-Do not copy the whole `animgen_checkpoint` directory into Unreal Engine, and do not replace `train_autoencoder.py`. The files under `reference/` are unmodified UE 5.8 reference copies and are not the files to install.
 
 ## Default behavior
 
