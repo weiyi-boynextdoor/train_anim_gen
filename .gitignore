@@ -1,1 +1,5 @@
 .ue_source_folder
+.vscode/
+
+__pycache__/
+.ruff_cache/
