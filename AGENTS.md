@@ -11,6 +11,7 @@ This repository implements remote deep-learning training for Unreal Engine's exp
 
 ## Unreal Engine source reference
 
+- `reference/` contains the original Unreal Engine Python scripts for reference.
 - Read the local Unreal Engine source root from `.ue_source_folder`. Trim surrounding whitespace before using it.
 - `.ue_source_folder` is machine-local and must remain ignored by Git.
 - Treat the referenced Unreal Engine tree as read-only unless the user explicitly asks to install or update the bridge scripts there.
