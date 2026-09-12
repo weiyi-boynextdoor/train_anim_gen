@@ -24,26 +24,51 @@ Diagram aliases refer to configuration fields: `D = PoseEncodingSize` (from the 
 
 Widths below count elements per sample, not parameters: width `H` means `[B, H]` during training. A linear layer is fully connected; activation and LayerNorm preserve width. Pose encoder/decoder layers are shown in the [autoencoder workflow](train-autoencoder-workflow.md#network-structure-layer-by-layer).
 
-### Control encoder: schema-dependent layers
+### Control encoder example: TaggedBehavior with TrajectoryFollowBehavior
 
-There is no universal numeric `C`, `E`, or hidden-layer count. Simple continuous/discrete leaf fields can use dimension-preserving affine layers; an `And` node concatenates child encodings. An `Encoding` node adds an MLP after its child's encoder.
+Use a `TaggedBehavior` (`UAnimGenBehavior_Tagged`) whose inner `Behavior` is a `TrajectoryFollowBehavior` (`UAnimGenBehavior_TrajectoryFollow`). Set `TrajectorySampleNum = 4` for this example. Let `S = TrajectorySampleNum` and `T = TagCount`, where `TagCount` means the number of unique names in `TagRanges`, not the number of active tags in one frame.
 
-This is an illustrative schema with an `Encoding` wrapping two children under `And`, not a fixed controller architecture. `K` and `N` are the Encoding node's `EncodingSize` and `LayerNum`.
+The schema has this exact nesting and field order:
+
+```text
+TaggedBehavior: Struct / And
+├── Behavior: TrajectoryFollowBehavior: Struct / And
+│   ├── Locations: Array(TrajectorySampleNum) of Continuous(3)
+│   └── Directions: Array(TrajectorySampleNum) of Continuous(3)
+└── Tags: NamedDiscreteInclusive(TagCount)
+```
+
+Each point supplies a 3D position and a 3D unit forward direction. Facing is represented by `Directions`, not a quaternion or three Euler angles. Runtime trajectory sampling rotates `TrajectoryForwardVector` by the sampled facing rotation, then expresses the direction in the root-relative frame. Locations are also expressed relative to the root transform. The points are sampled across the configured past/future interval; they are not the LOD output horizons `1, 2, 4, 8`.
+
+| Input field | Elements per sample | Four-point example |
+| --- | --- | --- |
+| `Behavior.Locations` | `3 * TrajectorySampleNum` | 12 |
+| `Behavior.Directions` | `3 * TrajectorySampleNum` | 12 |
+| `Tags` | `TagCount` | `T` multi-hot entries; multiple tags can be active |
+| Full control vector | `ControlVectorSize = 6 * TrajectorySampleNum + TagCount` | `24 + T` |
+
+The flattened order is `[location_0, ..., location_(S-1), direction_0, ..., direction_(S-1), tags]`. Positions and directions are grouped into separate arrays, rather than alternating position/direction for each point. Training fills these fields from database trajectories and tag ranges; runtime fills them from the desired trajectory and desired tags using the same schema.
 
 ```mermaid
 flowchart TD
-    C["Controls: C1 + C2"] --> S["Split by schema"]
-    S --> A["Child encoder: C1 → E1"]
-    S --> B["Child encoder: C2 → E2"]
-    A --> CAT["And: concatenate; Q = E1 + E2"]
-    B --> CAT
-    CAT --> L["Linear: Q → K"]
-    L --> ACT["Schema activation: K"]
-    ACT --> R["N repetitions: Linear K → K, then activation K"]
-    R --> O["Encoded controls: E = K"]
+    INPUT["ControlVectorSize = 6 * TrajectorySampleNum + TagCount; example S = 4"] --> SPLIT["TaggedBehavior: split Behavior and Tags"]
+    SPLIT --> BEH["TrajectoryFollowBehavior: split Locations and Directions"]
+    SPLIT --> TAG["Tags: TagCount elements"]
+    BEH --> LOC["Locations: TrajectorySampleNum x 3; example 4 x 3"]
+    BEH --> DIR["Directions: TrajectorySampleNum x 3; example 4 x 3"]
+    LOC --> LA["Array: apply Continuous affine 3 → 3 to each point"]
+    DIR --> DA["Array: apply Continuous affine 3 → 3 to each point"]
+    LA --> BC["Behavior And: concatenate; 6 * TrajectorySampleNum elements"]
+    DA --> BC
+    TAG --> TA["NamedDiscreteInclusive affine: TagCount → TagCount"]
+    BC --> ROOT["Tagged And: concatenate Behavior then Tags"]
+    TA --> ROOT
+    ROOT --> OUT["EncodedControlVectorSize = 6 * TrajectorySampleNum + TagCount; example 24 + T"]
 ```
 
-This Encoding node has `N + 1` linear layers, including an activation after the last projection. With `N = 0`, omit the repeated part. Other composite schema types use their own operations. Exact widths must come from the actual schema and loaded `controller_network`, not from a fixed diagram.
+**This exact composition adds no MLP.** Continuous and named-discrete leaf encoders use elementwise affine transforms; arrays apply the child encoder across their elements; `And` nodes concatenate results. Consequently `EncodedControlVectorSize = ControlVectorSize` for this example. There are **zero fully connected Linear layers, zero GELU layers, and zero residual blocks** in this control encoder. The affine transforms use per-element scale/offset, not a dense matrix mixing all coordinates. Python initializes schema normalization before training, and the encoder's parameters participate in the teacher-stage optimizer.
+
+A separate `EncodedBehavior` wrapper would explicitly add an `Encoding` MLP, but it is not part of this example. The teacher and LOD networks below still contain their own fully connected layers and consume this `24 + T` conditioning vector for the four-point configuration.
 
 ### Residual block
 

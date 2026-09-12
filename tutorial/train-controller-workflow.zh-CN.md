@@ -24,26 +24,51 @@ Controller 根据当前姿态、行为控制量和随机噪声生成未来姿态
 
 下面的维度是单个样本的元素数，不是参数数量；训练时宽度 `H` 对应 `[B, H]`。Linear 是全连接层，激活层和 LayerNorm 保持维度不变。姿态编码器和解码器的逐层结构参见 [Autoencoder 工作流](train-autoencoder-workflow.zh-CN.md#网络结构逐层维度与连接)。
 
-### 控制编码器：由 schema 决定层结构
+### 控制编码器示例：TaggedBehavior 包含 TrajectoryFollowBehavior
 
-这里没有通用的固定 `C`、`E` 或隐藏层数。连续或离散等简单叶子字段可以使用保持维度的仿射层；`And` 节点拼接子节点编码；`Encoding` 节点在其子编码器之后增加一个 MLP。
+使用一个 `TaggedBehavior`（`UAnimGenBehavior_Tagged`），其内部 `Behavior` 为 `TrajectoryFollowBehavior`（`UAnimGenBehavior_TrajectoryFollow`）。本例设置 `TrajectorySampleNum = 4`。记 `S = TrajectorySampleNum`，`T = TagCount`；其中 `TagCount` 指 `TagRanges` 中去重后的标签名数量，不是某一帧激活的标签数。
 
-下图是一个示例 schema：`Encoding` 包裹包含两个子节点的 `And`，不代表所有 Controller 的固定结构。`K` 和 `N` 分别表示该 Encoding 节点的 `EncodingSize` 和 `LayerNum`。
+实际 schema 的嵌套和字段顺序如下：
+
+```text
+TaggedBehavior：Struct / And
+├── Behavior：TrajectoryFollowBehavior：Struct / And
+│   ├── Locations：Array(TrajectorySampleNum)，每项 Continuous(3)
+│   └── Directions：Array(TrajectorySampleNum)，每项 Continuous(3)
+└── Tags：NamedDiscreteInclusive(TagCount)
+```
+
+每个点提供三维位置和三维单位前向方向。“朝向”由 `Directions` 表示，不是四元数或三个欧拉角。运行时轨迹采样先用采样点的朝向旋转 `TrajectoryForwardVector`，再转换成相对根节点的方向；位置也转换到根节点的相对坐标系。这些点分布在配置的过去/未来时间区间内，不是 LOD 输出的第 `1、2、4、8` 帧。
+
+| 输入字段 | 每个样本的元素数 | 本例四点时 |
+| --- | --- | --- |
+| `Behavior.Locations` | `3 * TrajectorySampleNum` | 12 |
+| `Behavior.Directions` | `3 * TrajectorySampleNum` | 12 |
+| `Tags` | `TagCount` | `T` 个 multi-hot 分量，允许多个标签同时激活 |
+| 完整控制向量 | `ControlVectorSize = 6 * TrajectorySampleNum + TagCount` | `24 + T` |
+
+展平顺序为 `[location_0, ..., location_(S-1), direction_0, ..., direction_(S-1), tags]`。所有位置组成一个数组，所有方向组成另一个数组，并不是每点的位置和方向交替排列。训练时从数据库轨迹和标签区间填充这些字段；运行时从期望轨迹和期望标签按相同 schema 填充。
 
 ```mermaid
 flowchart TD
-    C["控制量：C1 + C2"] --> S["按 schema 拆分"]
-    S --> A["子编码器：C1 → E1"]
-    S --> B["子编码器：C2 → E2"]
-    A --> CAT["And 拼接：Q = E1 + E2"]
-    B --> CAT
-    CAT --> L["Linear：Q → K"]
-    L --> ACT["Schema 激活：K"]
-    ACT --> R["重复 N 次：Linear K → K，再接激活 K"]
-    R --> O["控制特征：E = K"]
+    INPUT["ControlVectorSize = 6 * TrajectorySampleNum + TagCount；本例 S = 4"] --> SPLIT["TaggedBehavior：拆分 Behavior 和 Tags"]
+    SPLIT --> BEH["TrajectoryFollowBehavior：拆分 Locations 和 Directions"]
+    SPLIT --> TAG["Tags：TagCount 个元素"]
+    BEH --> LOC["Locations：TrajectorySampleNum x 3；本例 4 x 3"]
+    BEH --> DIR["Directions：TrajectorySampleNum x 3；本例 4 x 3"]
+    LOC --> LA["Array：每点执行 Continuous 仿射 3 → 3"]
+    DIR --> DA["Array：每点执行 Continuous 仿射 3 → 3"]
+    LA --> BC["Behavior And：拼接为 6 * TrajectorySampleNum 个元素"]
+    DA --> BC
+    TAG --> TA["NamedDiscreteInclusive 仿射：TagCount → TagCount"]
+    BC --> ROOT["Tagged And：先 Behavior 后 Tags 拼接"]
+    TA --> ROOT
+    ROOT --> OUT["EncodedControlVectorSize = 6 * TrajectorySampleNum + TagCount；本例 24 + T"]
 ```
 
-这个 Encoding 节点共有 `N + 1` 个线性层，最后一个投影之后也有激活。若 `N = 0`，省略重复部分。其他复合 schema 类型使用各自的运算。具体维度必须根据实际 schema 和加载的 `controller_network` 确定，不能从一张固定图推断。
+**这个具体组合不会添加 MLP。** Continuous 和命名离散叶子编码器执行逐元素仿射变换；Array 将子编码器应用于数组元素；And 拼接各分支结果。因此本例中 `EncodedControlVectorSize = ControlVectorSize`。控制编码器包含 **0 个全连接 Linear 层、0 个 GELU 层、0 个残差块**。仿射变换使用逐元素尺度和偏置，不通过稠密矩阵混合所有坐标。Python 在训练前初始化 schema 归一化，编码器参数参与第一阶段教师训练的优化。
+
+另外添加 `EncodedBehavior` 包装才会显式引入 `Encoding` MLP，本例不包含该包装。下文的 Teacher 和 LOD 仍然有自己的全连接层，四点配置下接收这里生成的 `24 + T` 维控制特征。
 
 ### 残差块
 
