@@ -18,6 +18,94 @@ Let `D` be the pose-latent size, `C` the control-vector size, `E` the encoded-co
 
 The control encoder's architecture comes from the observation schema. The teacher is a residual MLP created in Python. The LODs are C++-built residual MLPs with different capacities and identical input/output layouts. They are alternative generators, not a chain of three networks.
 
+## Network structures, layer by layer
+
+Diagram aliases refer to configuration fields: `D = PoseEncodingSize` (from the autoencoder's `EncodingSize`, default 150), `C = ControlVectorSize`, and `E = EncodedControlVectorSize` (both schema-dependent). In the LOD diagram, `H = LODxHiddenUnitNum` and `L = LODxLayerNum`; defaults for each LOD are listed below.
+
+Widths below count elements per sample, not parameters: width `H` means `[B, H]` during training. A linear layer is fully connected; activation and LayerNorm preserve width. Pose encoder/decoder layers are shown in the [autoencoder workflow](train-autoencoder-workflow.md#network-structure-layer-by-layer).
+
+### Control encoder: schema-dependent layers
+
+There is no universal numeric `C`, `E`, or hidden-layer count. Simple continuous/discrete leaf fields can use dimension-preserving affine layers; an `And` node concatenates child encodings. An `Encoding` node adds an MLP after its child's encoder.
+
+This is an illustrative schema with an `Encoding` wrapping two children under `And`, not a fixed controller architecture. `K` and `N` are the Encoding node's `EncodingSize` and `LayerNum`.
+
+```mermaid
+flowchart TD
+    C["Controls: C1 + C2"] --> S["Split by schema"]
+    S --> A["Child encoder: C1 → E1"]
+    S --> B["Child encoder: C2 → E2"]
+    A --> CAT["And: concatenate; Q = E1 + E2"]
+    B --> CAT
+    CAT --> L["Linear: Q → K"]
+    L --> ACT["Schema activation: K"]
+    ACT --> R["N repetitions: Linear K → K, then activation K"]
+    R --> O["Encoded controls: E = K"]
+```
+
+This Encoding node has `N + 1` linear layers, including an activation after the last projection. With `N = 0`, omit the repeated part. Other composite schema types use their own operations. Exact widths must come from the actual schema and loaded `controller_network`, not from a fixed diagram.
+
+### Residual block
+
+The teacher and LOD interior blocks use this connection pattern:
+
+```mermaid
+flowchart LR
+    H["h: H"] --> L["Linear: H → H"]
+    L --> N["LayerNorm: H"]
+    N --> A["Activation: H"]
+    A --> ADD["Elementwise add: H"]
+    H -->|identity skip| ADD
+    ADD --> O["Next h: H"]
+```
+
+The block computes `h_next = h + activation(LayerNorm(Linear(h)))`. Both branches have `H` elements; addition does not concatenate them into `2H`. Repeated blocks have independent parameters. LayerNorm operates across each sample's hidden features.
+
+### Teacher
+
+The diagram uses editor defaults `DenoiserHiddenUnitNum = 1792` and `DenoiserLayerNum = 10`, supplied through launch configuration.
+
+```mermaid
+flowchart TD
+    P["Previous pose: D"] --> CAT["Concatenate: 5D + 1 + E"]
+    V["Intermediate future block: 4D"] --> CAT
+    T["Flow time alpha: 1"] --> CAT
+    C["Encoded controls: E"] --> CAT
+    CAT --> L["Linear: 5D + 1 + E → DenoiserHiddenUnitNum (default 1792)"]
+    L --> N["LayerNorm: DenoiserHiddenUnitNum (default 1792)"]
+    N --> A["GELU: DenoiserHiddenUnitNum (default 1792)"]
+    A --> R["DenoiserLayerNum - 1 residual blocks (default 9) in sequence; H = DenoiserHiddenUnitNum (default 1792); GELU"]
+    R --> OUT["Linear: DenoiserHiddenUnitNum (default 1792) → 4D"]
+    OUT --> Y["Flow velocity: 4D; no output activation"]
+```
+
+For `L = DenoiserLayerNum`, there are `L - 1` residual blocks and `L + 1` linear layers in total: **11 linear layers in this example**. Both the input projection and interior blocks use LayerNorm and GELU. Flow time is concatenated directly, without a time-embedding network. With `D = 150`, input width is `751 + E` and output width is `600`. Integration happens outside the network.
+
+### LOD0, LOD1, and LOD2
+
+```mermaid
+flowchart TD
+    P["Previous pose: D"] --> CAT["Concatenate: 5D + E"]
+    N["Initial noise: 4D"] --> CAT
+    C["Encoded controls: E"] --> CAT
+    CAT --> IN["Linear: 5D + E → H"]
+    IN --> A["Activation: H; default GELU"]
+    A --> R["L - 2 residual blocks in sequence; width H"]
+    R --> OUT["Linear: H → 4D; no output activation"]
+    OUT --> AF["Affine: 4D; raw * scale + offset"]
+    AF --> Y["Reshape to 4 × D; horizons 1, 2, 4, 8"]
+```
+
+The input projection has no LayerNorm. Interior blocks use the residual diagram above. `L = LODxLayerNum` counts all linear layers, including the input and output projections. Activation is configurable and defaults to GELU.
+
+| Network | Hidden width H | Linear layers L | Residual blocks | Projections in execution order |
+| --- | --- | --- | --- | --- |
+| LOD0 | `LOD0HiddenUnitNum` (default 1024) | `LOD0LayerNum` (default 8) | `LOD0LayerNum - 2` (default 6) | `(5D + E) -> H`; `(H -> H)` x `(L - 2)`; `H -> 4D` |
+| LOD1 | `LOD1HiddenUnitNum` (default 512) | `LOD1LayerNum` (default 6) | `LOD1LayerNum - 2` (default 4) | `(5D + E) -> H`; `(H -> H)` x `(L - 2)`; `H -> 4D` |
+| LOD2 | `LOD2HiddenUnitNum` (default 256) | `LOD2LayerNum` (default 4) | `LOD2LayerNum - 2` (default 2) | `(5D + E) -> H`; `(H -> H)` x `(L - 2)`; `H -> 4D` |
+
+These are editor defaults and can be overridden. With `D = 150`, input width is `750 + E`, and output is `600` elements reshaped into four 150-element poses. The final affine layer starts with zero offsets and scales from `NormalizedPoseStds` repeated for the four horizons. Its parameters are not explicitly frozen in the script. This output remains in controller-normalized latent space; runtime must undo controller normalization before evaluating the autoencoder decoder.
+
 ## Inference: controls to animation
 
 ```mermaid

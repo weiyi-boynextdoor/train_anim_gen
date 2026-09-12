@@ -15,6 +15,43 @@ Let `P` be the pose-vector size, `D` the latent size, and `B` the batch size. Po
 
 Both networks are feed-forward MLPs that process one pose at a time. Adjacent frames provide temporal supervision during training, but a network input is a single pose, not a sequence.
 
+## Network structure, layer by layer
+
+The diagram shows the configurable architecture: `EncodingSize` (default 150), `HiddenUnitNum` (default 512), `LayerNum` (default 2), and `ActivationFunction` (default GELU). `PoseVectorSize` depends on the selected pose channels. Each repeated group contains a linear layer followed by activation; repetitions are sequential layers with independent weights, not recurrent execution of one shared layer.
+
+Labels count elements **per sample**, not parameters. With a batch of size `B`, a layer labeled `512` produces `[B, 512]`. `Linear: a -> b` is fully connected: each of the `b` outputs uses all `a` inputs plus a bias. Activations preserve width; arrows show tensor flow.
+
+```mermaid
+flowchart TD
+    X["Normalized pose: PoseVectorSize elements"] --> EL
+    subgraph ENC["Encoder hidden stack: repeat Linear + activation LayerNum - 1 times (default 1)"]
+        EL["Linear: first PoseVectorSize -> HiddenUnitNum; later HiddenUnitNum -> HiddenUnitNum (default 512)"]
+        EL --> EA["ActivationFunction (default GELU): HiddenUnitNum elements"]
+    end
+    EA --> EO["Output Linear x 1: HiddenUnitNum (default 512) -> EncodingSize (default 150)"]
+    EO --> ET["Tanh: EncodingSize (default 150) -> EncodingSize (default 150)"]
+    ET --> Z["Latent z: EncodingSize (default 150) elements"]
+    Z --> DL
+    subgraph DEC["Decoder hidden stack: repeat Linear + activation LayerNum - 1 times (default 1)"]
+        DL["Linear: first EncodingSize -> HiddenUnitNum; later HiddenUnitNum -> HiddenUnitNum (default 512)"]
+        DL --> DA["ActivationFunction (default GELU): HiddenUnitNum elements"]
+    end
+    DA --> DO["Output Linear x 1: HiddenUnitNum (default 512) -> PoseVectorSize"]
+    DO --> DN["Fixed affine: PoseVectorSize -> PoseVectorSize; y = raw * std + mean"]
+    DN --> Y["Reconstructed normalized pose: PoseVectorSize elements"]
+```
+
+For configurable width `H`, latent size `D`, and linear-layer count `L`, the encoder is `P -> H -> ... -> H -> D -> Tanh`; the decoder is `D -> H -> ... -> H -> P -> affine`. There are `L - 1` hidden linear layers, each followed by the configured activation, and one output linear layer. For `L = 1`, each network has only its direct input-to-output linear projection before its final Tanh or affine layer.
+
+| Layer type | Encoder count | Decoder count |
+| --- | --- | --- |
+| Hidden Linear + activation pair | `LayerNum - 1` (default 1) | `LayerNum - 1` (default 1) |
+| Output Linear | 1 | 1 |
+| Total Linear layers | `LayerNum` (default 2) | `LayerNum` (default 2) |
+| Final transform | 1 Tanh | 1 fixed affine |
+
+There are no residual connections or LayerNorm layers. Hidden activations can be GELU, ReLU, ELU, or Tanh; the encoder's final Tanh remains present regardless of that choice. The decoder has no nonlinear activation after its output projection. Its final affine parameters are frozen during training. Asset-level pose normalization before encoding and inverse normalization after decoding sit outside this diagram.
+
 ## Inference: encode and reconstruct a pose
 
 ```mermaid

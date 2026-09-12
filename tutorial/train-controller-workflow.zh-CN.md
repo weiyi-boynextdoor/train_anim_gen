@@ -1,4 +1,4 @@
-﻿# Controller：推理与训练
+# Controller：推理与训练
 
 [English](train-controller-workflow.md) | 中文
 
@@ -17,6 +17,94 @@ Controller 根据当前姿态、行为控制量和随机噪声生成未来姿态
 | Autoencoder 姿态解码器 | 撤销 Controller 归一化后的生成 latent | 归一化完整姿态，经姿态反归一化和解包后生成动画 | 前置的 Autoencoder 训练 |
 
 控制编码器的结构由观察 schema 决定。教师是在 Python 中创建的残差 MLP。LOD 网络是在 C++ 中构建的残差 MLP，容量不同，但输入输出布局相同。运行时从三个 LOD 中选一个使用，它们不串联执行。
+
+## 网络结构：逐层维度与连接
+
+图中缩写对应配置字段：`D = PoseEncodingSize`（来自 Autoencoder 的 `EncodingSize`，默认 150），`C = ControlVectorSize`，`E = EncodedControlVectorSize`（后两者由 schema 决定）。LOD 图中 `H = LODxHiddenUnitNum`，`L = LODxLayerNum`；各 LOD 的默认值见下表。
+
+下面的维度是单个样本的元素数，不是参数数量；训练时宽度 `H` 对应 `[B, H]`。Linear 是全连接层，激活层和 LayerNorm 保持维度不变。姿态编码器和解码器的逐层结构参见 [Autoencoder 工作流](train-autoencoder-workflow.zh-CN.md#网络结构逐层维度与连接)。
+
+### 控制编码器：由 schema 决定层结构
+
+这里没有通用的固定 `C`、`E` 或隐藏层数。连续或离散等简单叶子字段可以使用保持维度的仿射层；`And` 节点拼接子节点编码；`Encoding` 节点在其子编码器之后增加一个 MLP。
+
+下图是一个示例 schema：`Encoding` 包裹包含两个子节点的 `And`，不代表所有 Controller 的固定结构。`K` 和 `N` 分别表示该 Encoding 节点的 `EncodingSize` 和 `LayerNum`。
+
+```mermaid
+flowchart TD
+    C["控制量：C1 + C2"] --> S["按 schema 拆分"]
+    S --> A["子编码器：C1 → E1"]
+    S --> B["子编码器：C2 → E2"]
+    A --> CAT["And 拼接：Q = E1 + E2"]
+    B --> CAT
+    CAT --> L["Linear：Q → K"]
+    L --> ACT["Schema 激活：K"]
+    ACT --> R["重复 N 次：Linear K → K，再接激活 K"]
+    R --> O["控制特征：E = K"]
+```
+
+这个 Encoding 节点共有 `N + 1` 个线性层，最后一个投影之后也有激活。若 `N = 0`，省略重复部分。其他复合 schema 类型使用各自的运算。具体维度必须根据实际 schema 和加载的 `controller_network` 确定，不能从一张固定图推断。
+
+### 残差块
+
+Teacher 和 LOD 的中间残差块使用以下连接方式：
+
+```mermaid
+flowchart LR
+    H["输入 h：H"] --> L["Linear：H → H"]
+    L --> N["LayerNorm：H"]
+    N --> A["激活：H"]
+    A --> ADD["逐元素相加：H"]
+    H -->|恒等跳连| ADD
+    ADD --> O["下一层 h：H"]
+```
+
+计算为 `h_next = h + activation(LayerNorm(Linear(h)))`。两路各有 `H` 个元素，相加后仍为 `H`，不会拼接为 `2H`。重复串联的各残差块拥有独立参数。LayerNorm 在每个样本的隐藏特征维度上进行归一化。
+
+### Teacher
+
+下图使用编辑器默认值 `DenoiserHiddenUnitNum = 1792`、`DenoiserLayerNum = 10`，由启动配置传入 Python。
+
+```mermaid
+flowchart TD
+    P["前一姿态：D"] --> CAT["拼接：5D + 1 + E"]
+    V["中间未来姿态块：4D"] --> CAT
+    T["流时间 alpha：1"] --> CAT
+    C["控制特征：E"] --> CAT
+    CAT --> L["Linear：5D + 1 + E → DenoiserHiddenUnitNum (默认1792)"]
+    L --> N["LayerNorm：DenoiserHiddenUnitNum (默认1792)"]
+    N --> A["GELU：DenoiserHiddenUnitNum (默认1792)"]
+    A --> R["串联 DenoiserLayerNum - 1 个残差块（默认 9）；H = DenoiserHiddenUnitNum (默认1792)；GELU"]
+    R --> OUT["Linear：DenoiserHiddenUnitNum (默认1792) → 4D"]
+    OUT --> Y["流速度：4D；无输出激活"]
+```
+
+令 `L = DenoiserLayerNum`，则残差块数为 `L - 1`，线性层总数为 `L + 1`，所以**图中共有 11 个线性层**。输入投影和中间残差块都有 LayerNorm 和 GELU。流时间直接拼接，没有独立的时间嵌入网络。当 `D = 150` 时，输入宽度为 `751 + E`，输出宽度为 `600`。积分在网络外部执行。
+
+### LOD0、LOD1 和 LOD2
+
+```mermaid
+flowchart TD
+    P["前一姿态：D"] --> CAT["拼接：5D + E"]
+    N["初始噪声：4D"] --> CAT
+    C["控制特征：E"] --> CAT
+    CAT --> IN["Linear：5D + E → H"]
+    IN --> A["激活：H；默认 GELU"]
+    A --> R["串联 L - 2 个残差块；宽度 H"]
+    R --> OUT["Linear：H → 4D；无输出激活"]
+    OUT --> AF["仿射层：4D；raw * scale + offset"]
+    AF --> Y["重排为 4 × D；对应第 1、2、4、8 帧"]
+```
+
+输入投影后没有 LayerNorm。中间残差块使用前面的结构。`L = LODxLayerNum` 包括输入和输出投影，是全部线性层的数量。激活可配置，默认为 GELU。
+
+| 网络 | 隐藏宽度 H | 线性层数 L | 残差块数 | 按执行顺序列出的投影 |
+| --- | --- | --- | --- | --- |
+| LOD0 | `LOD0HiddenUnitNum` (默认1024) | `LOD0LayerNum` (默认8) | `LOD0LayerNum - 2` (默认6) | `(5D + E) -> H`; `(H -> H)` x `(L - 2)`; `H -> 4D` |
+| LOD1 | `LOD1HiddenUnitNum` (默认512) | `LOD1LayerNum` (默认6) | `LOD1LayerNum - 2` (默认4) | `(5D + E) -> H`; `(H -> H)` x `(L - 2)`; `H -> 4D` |
+| LOD2 | `LOD2HiddenUnitNum` (默认256) | `LOD2LayerNum` (默认4) | `LOD2LayerNum - 2` (默认2) | `(5D + E) -> H`; `(H -> H)` x `(L - 2)`; `H -> 4D` |
+
+这些是可覆盖的编辑器默认值。当 `D = 150` 时，输入宽度为 `750 + E`，输出为 `600` 个元素，重排成四个 150 维姿态。末尾仿射层初始偏置为零，尺度来自按四个时间点重复的 `NormalizedPoseStds`；脚本没有显式冻结该层参数。输出仍在 Controller 归一化 latent 空间中，运行时需要先撤销 Controller 归一化，再执行 Autoencoder 解码器。
 
 ## 推理：从控制量生成动画
 

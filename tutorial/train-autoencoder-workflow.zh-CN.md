@@ -1,4 +1,4 @@
-﻿# Autoencoder：推理与训练
+# Autoencoder：推理与训练
 
 [English](train-autoencoder-workflow.md) | 中文
 
@@ -14,6 +14,43 @@ Autoencoder 将完整姿态压缩为潜在向量（latent），再从 latent 重
 | 姿态解码器 | `[B, D]` latent；Autoencoder 训练时来自编码器，运行时来自撤销 Controller 归一化后的生成结果 | `[B, P]` 重建的归一化姿态向量；与训练姿态比较，或还原成动画 |
 
 两个网络都是前馈 MLP，每次处理一个姿态。训练时相邻帧提供时间上的监督，但单次网络输入是一个姿态，并不是一段序列。
+
+## 网络结构：逐层维度与连接
+
+下图表示可配置结构：`EncodingSize`（默认150）、`HiddenUnitNum`（默认512）、`LayerNum`（默认2）、`ActivationFunction`（默认GELU）。`PoseVectorSize` 取决于选中的姿态通道。每个重复单元包含一个 Linear 和一个激活层；重复表示多个参数独立的层依次串联，不是循环调用同一个共享权重的层。
+
+图中数字是单个样本的元素数，不是参数数量。例如宽度 `512` 在 batch 中对应 `[B, 512]`。`Linear(a → b)` 表示全连接：每个输出使用全部 `a` 个输入并加偏置，共产生 `b` 个输出。激活层保持维度不变。
+
+```mermaid
+flowchart TD
+    X["归一化姿态：PoseVectorSize"] --> EL
+    subgraph ENC["编码器隐藏层：Linear + 激活串联 LayerNum - 1 组（默认1组）"]
+        EL["Linear：首层 PoseVectorSize → HiddenUnitNum；后续 HiddenUnitNum → HiddenUnitNum（默认512）"]
+        EL --> EA["ActivationFunction（默认GELU）：HiddenUnitNum 个元素"]
+    end
+    EA --> EO["输出 Linear × 1：HiddenUnitNum（默认512）→ EncodingSize（默认150）"]
+    EO --> T["Tanh：EncodingSize (默认150)"]
+    T --> Z["姿态 latent：EncodingSize (默认150)"]
+    Z --> DL
+    subgraph DEC["解码器隐藏层：Linear + 激活串联 LayerNum - 1 组（默认1组）"]
+        DL["Linear：首层 EncodingSize → HiddenUnitNum；后续 HiddenUnitNum → HiddenUnitNum（默认512）"]
+        DL --> DA["ActivationFunction（默认GELU）：HiddenUnitNum 个元素"]
+    end
+    DA --> DO["输出 Linear × 1：HiddenUnitNum（默认512）→ PoseVectorSize"]
+    DO --> AF["固定仿射层：PoseVectorSize；raw * std + mean"]
+    AF --> Y["重建的归一化姿态：PoseVectorSize"]
+```
+
+一般情况下，`LayerNum = L` 表示每个网络的线性层总数：`L - 1` 个隐藏线性层各接激活，再接一个输出线性层。编码器为 `P → H → ... → H → D → Tanh`，解码器为 `D → H → ... → H → P → affine`。若 `L = 1`，输入直接投影到输出，不经过隐藏层。
+
+| 层类型 | 编码器数量 | 解码器数量 |
+| --- | --- | --- |
+| 隐藏 Linear + 激活组合 | `LayerNum - 1`（默认1组） | `LayerNum - 1`（默认1组） |
+| 输出 Linear | 1 | 1 |
+| Linear 总数 | `LayerNum`（默认2） | `LayerNum`（默认2） |
+| 最终变换 | 1 个 Tanh | 1 个固定仿射层 |
+
+这里没有残差连接，也没有 LayerNorm。隐藏激活可以是 GELU、ReLU、ELU 或 Tanh；编码器末尾始终额外保留 Tanh。解码器输出线性层后没有非线性激活，其末尾仿射参数在训练时被冻结。资产层面的姿态归一化与反归一化位于图中网络之外。
 
 ## 推理：编码姿态，再还原动画
 
