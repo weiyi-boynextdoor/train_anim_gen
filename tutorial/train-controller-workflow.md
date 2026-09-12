@@ -200,6 +200,48 @@ JSON supplies identifiers, dimensions, schema, noise statistics, and settings. P
 
 Python initializes control normalization from the full control array and writes it into the schema-based control encoder. It creates a fresh teacher network. Neither autoencoder network is optimized by this script.
 
+## Flow Matching: from noise to future poses
+
+Flow Matching trains a generative model to move samples from a simple noise distribution toward a data distribution. A neural network learns a **velocity field**: given an intermediate sample and a flow time, it predicts how that sample should change. Generation follows this field by integrating an ordinary differential equation (ODE). Training can regress known velocities at sampled times without solving the ODE. See [Flow Matching for Generative Modeling](https://arxiv.org/abs/2210.02747) for the general framework.
+
+In this controller, the generated sample is an entire block of four future pose latents. The field is conditioned on the previous pose `p` and encoded controls `e`, so generation depends on the current animation state and requested behavior. Source noise supplies variation between generated samples.
+
+### Learn the direction along a noise-to-data path
+
+The implementation in [train_controller.py](../reference/train_controller.py) uses a straight interpolation path. Let `n` be source noise, `y` a dataset future-pose block, and `a` the flow time:
+
+```text
+x(a)       = (1 - a) * n + a * y
+x(0)       = n
+x(1)       = y
+dx(a) / da = y - n
+```
+
+Here `x(a)` is the intermediate block called `v` in Stage 1 below. Both endpoints have `4D` elements. The script constructs `n` from clipped Gaussian noise scaled by `NormalizedPoseStds`.
+
+For each training example, sample `a`, construct `x(a)`, and ask the teacher to predict `y - n` from `[p, x(a), a, e]`. The mean squared error gives a directly computable supervision signal. For a one-dimensional illustration, `n = -1`, `y = 3`, and `a = 0.25` give `x(a) = 0` and target velocity `4`.
+
+The teacher does not receive the target endpoint `y` as an input. Across many sampled pairs, it learns a shared field; a generated trajectory need not follow any individual training pair's straight line.
+
+### Generate by following the learned field
+
+When producing distillation targets, the future dataset endpoint is no longer used. Start from fresh noise and numerically integrate the teacher's predictions, holding `p` and `e` fixed for this block:
+
+```text
+dx / da = teacher(p, x, a, e), with x(0) = n
+
+# Explicit Euler integration used by the script:
+S = DenoiserSteps
+x = n
+for j in 0 ... S-1:
+    x = x + teacher(p, x, j / S, e) / S
+# x now approximates the generated future-pose block at flow time 1.
+```
+
+**Flow time is separate from animation time.** The interval `a = 0 ... 1` describes the transformation of noise into one block. The block's four entries refer to animation offsets `1, 2, 4, 8` frames. The predicted velocity is change in latent coordinates per unit flow time, not joint speed or root-motion velocity.
+
+Despite its name, `denoiser_network` predicts this velocity rather than the source noise or final poses. Stage 1 learns the field with a single sampled-time evaluation per example. Stage 2 uses repeated teacher evaluations to generate targets and trains each LOD to approximate the complete noise-to-pose mapping in one forward pass. Runtime then uses a selected LOD, as described above.
+
 ## Stage 1: train the teacher and control encoder
 
 Python enumerates all nine-frame windows inside each aligned range. Each iteration randomly samples `B` windows. No window crosses a range boundary.

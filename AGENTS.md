@@ -6,7 +6,7 @@ This repository implements remote deep-learning training for Unreal Engine's exp
 
 ## Language
 
-- Write all source code, code comments, identifiers, user-facing strings, commit-ready documentation, and examples in English.
+- Write all source code, code comments, identifiers, user-facing strings, commit-ready documentation, and examples in English, except for the Chinese tutorial documentation described below.
 - Keep protocol field names and error messages stable once published. Treat changes to them as compatibility changes.
 
 ## Unreal Engine source reference
@@ -51,6 +51,8 @@ This repository implements remote deep-learning training for Unreal Engine's exp
 
 ## Documentation
 
+- Maintain each tutorial document in `tutorial/` in both English (`<name>.md`) and Simplified Chinese (`<name>.zh-CN.md`).
+- When adding or updating a tutorial, update both language versions together and keep their technical content aligned. Include links between the paired versions.
 - Keep `docs/remote-training-architecture.md` aligned with implementation and protocol changes.
 - Record protocol-breaking changes and supported Unreal revisions explicitly.
 - Clearly distinguish implemented behavior from proposed behavior.
